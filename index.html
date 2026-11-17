@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spike temporizador</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <meta name="theme-color" content="#14181f">
+  <link rel="apple-touch-icon" href="icon-192.png">
+  <style>
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; max-width: 480px; margin-inline: auto; }
+    h1 { font-size: 1rem; margin: 0 0 8px; }
+    #phase { font-size: 1.1rem; margin-top: 12px; }
+    #time { font-size: 5rem; font-variant-numeric: tabular-nums; line-height: 1.1; }
+    .row { display: flex; gap: 8px; margin: 8px 0; flex-wrap: wrap; }
+    button, select { font-size: 1.1rem; min-height: 48px; padding: 0 16px; }
+    #log { font: 12px/1.4 ui-monospace, monospace; background: #f2f2f2; padding: 8px; height: 220px; overflow: auto; white-space: pre-wrap; }
+    @media (prefers-color-scheme: dark) { body { background: #111; color: #eee; } #log { background: #222; } }
+  </style>
+</head>
+<body>
+  <h1>Spike temporizador · Día 4 (+ IndexedDB, PWA)</h1>
+  <div id="recover" hidden style="border:2px solid #d9a400;padding:8px;margin:8px 0">
+    <div id="recoverMsg"></div>
+    <div class="row">
+      <button id="recoverRestore" type="button">Restaurar en pausa</button>
+      <button id="recoverDiscard" type="button">Descartar</button>
+    </div>
+  </div>
+  <div id="sw">Service worker: sin registrar</div>
+  <div class="row">
+    <label>Modo
+      <select id="mode">
+        <option value="30">3 × 30 s</option>
+        <option value="10">3 × 10 s (rápido)</option>
+      </select>
+    </label>
+    <label>Aviso
+      <select id="strategy">
+        <option value="A">A: beep Web Audio + flash</option>
+        <option value="C">C: solo flash + vibración</option>
+        <option value="B">B: pista larga + Media Session</option>
+      </select>
+    </label>
+    <button id="testSound" type="button">Probar sonido</button>
+  </div>
+  <div id="wl">Wake Lock: sin solicitar</div>
+  <div id="phase">Listo</div>
+  <div id="time">0:00</div>
+  <div class="row">
+    <button id="start">Iniciar</button>
+    <button id="pause" disabled>Pausar</button>
+    <button id="reset" disabled>Reiniciar</button>
+  </div>
+  <div id="log" aria-live="off"></div>
+
+  <script src="engine.js"></script>
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const logEl = $('log');
+    const t0 = performance.now();
+    function log(msg) {
+      const s = ((performance.now() - t0) / 1000).toFixed(2).padStart(7);
+      logEl.textContent += s + 's  ' + msg + '\n';
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // ---- Audio (estrategia A) ----
+    let audioCtx = null;
+    function unlockAudio() {
+      try {
+        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (audioCtx.state !== 'running') audioCtx.resume().then(() => log('AudioContext: ' + audioCtx.state));
+        else log('AudioContext: running');
+      } catch (err) { log('AudioContext no disponible: ' + err.message); }
+    }
+    function beep(freq, durMs, whenOffset) {
+      if (!audioCtx) return false;
+      const t = audioCtx.currentTime + (whenOffset || 0);
+      const osc = audioCtx.createOscillator();
+      const gain = audioCtx.createGain();
+      osc.frequency.value = freq;
+      gain.gain.setValueAtTime(0.0001, t);
+      gain.gain.exponentialRampToValueAtTime(0.6, t + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, t + durMs / 1000);
+      osc.connect(gain).connect(audioCtx.destination);
+      osc.start(t); osc.stop(t + durMs / 1000 + 0.02);
+      return true;
+    }
+    function flash() {
+      const prev = document.body.style.background;
+      document.body.style.background = '#ffd400';
+      setTimeout(() => { document.body.style.background = prev; }, 250);
+    }
+    function alertUser(kind) { // kind: 'phase' | 'done' | 'test'
+      const strategy = $('strategy').value;
+      flash();
+      if (strategy === 'B') {
+        if (kind === 'test') log('B: el sonido solo sale de la pista; inicia una sesión para oírlo');
+        else logSyncB('aviso');
+      } else if (strategy === 'A') {
+        const ok = kind === 'done'
+          ? beep(660, 700, 0)
+          : (beep(880, 120, 0) && beep(880, 120, 0.2));
+        if (!ok) log('aviso A: sin AudioContext (¿falta gesto?)');
+      } else if (strategy === 'C') {
+        if (navigator.vibrate) navigator.vibrate(kind === 'done' ? [400] : [120, 80, 120]);
+        else log('vibración no soportada en este navegador');
+      }
+    }
+
+    // ---- Persistencia (IndexedDB) ----
+    function idb() {
+      return new Promise((res, rej) => {
+        const r = indexedDB.open('fc-spike', 1);
+        r.onupgradeneeded = () => r.result.createObjectStore('state');
+        r.onsuccess = () => res(r.result);
+        r.onerror = () => rej(r.error);
+      });
+    }
+    async function idbOp(mode, fn) {
+      const db = await idb();
+      return new Promise((res, rej) => {
+        const tx = db.transaction('state', mode);
+        const req = fn(tx.objectStore('state'));
+        tx.oncomplete = () => { db.close(); res(req && req.result); };
+        tx.onerror = () => { db.close(); rej(tx.error); };
+        tx.onabort = () => { db.close(); rej(tx.error || new Error('abort')); };
+      });
+    }
+    const saveRun = (o) => idbOp('readwrite', (s) => s.put(o, 'run'))
+      .catch((e) => log('IndexedDB: FALLÓ al guardar (' + (e && e.name) + ')'));
+    const clearRun = () => idbOp('readwrite', (s) => s.delete('run')).catch(() => {});
+    const loadRun = () => idbOp('readonly', (s) => s.get('run'));
+
+    let runCfg = null;   // {cycles, sec, strategy}
+    function snapshot() {
+      if (!engine || !runCfg) return;
+      if (engine.state === 'done' || engine.state === 'idle') { clearRun(); return; }
+      saveRun({ v: 1, cfg: runCfg, state: engine.state, index: engine.index,
+        remainingMs: Math.round(engine.remainingMs()), savedAtWall: Date.now() });
+    }
+
+    // ---- Estrategia B: pista larga con avisos incrustados ----
+    const track = new Audio();
+    track.preload = 'auto';
+    let trackActive = false;   // true mientras B está en uso en esta sesión
+    ['playing', 'pause', 'ended', 'error', 'stalled', 'waiting'].forEach((ev) =>
+      track.addEventListener(ev, () => {
+        if (!trackActive) return;
+        const note = ev === 'pause' && engine && engine.state === 'running' ? ' (INESPERADO: motor sigue corriendo)' : '';
+        log('audio ' + ev + ' t=' + track.currentTime.toFixed(2) + note);
+      }));
+    function engineElapsedSec() {
+      if (!engine || engine.state === 'idle') return 0;
+      let before = 0;
+      for (let i = 0; i < engine.index; i++) before += engine.phases[i].ms;
+      return (before + engine.current().ms - engine.remainingMs()) / 1000;
+    }
+    function logSyncB(label) {
+      if (!trackActive) return;
+      const d = track.currentTime - engineElapsedSec();
+      log('B ' + label + ': audio=' + track.currentTime.toFixed(2) + 's motor=' + engineElapsedSec().toFixed(2) +
+        's diferencia=' + d.toFixed(2) + 's paused=' + track.paused);
+    }
+    function startTrack(sec) {
+      trackActive = $('strategy').value === 'B';
+      if (!trackActive) return;
+      track.src = 'cue-' + sec + '.wav';
+      track.currentTime = 0;
+      track.play().then(() => log('B: reproduciendo pista cue-' + sec + '.wav'))
+        .catch((err) => log('B: no pudo reproducir: ' + err.name));
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.metadata = new MediaMetadata({ title: 'Descanso', artist: 'FitControl spike' });
+        navigator.mediaSession.setActionHandler('play', () => { if (engine.state === 'paused') togglePause(); });
+        navigator.mediaSession.setActionHandler('pause', () => { if (engine.state === 'running') togglePause(); });
+        log('Media Session configurada');
+      } else log('Media Session no soportada');
+    }
+    function stopTrack() {
+      if (!trackActive) return;
+      track.pause(); track.currentTime = 0; trackActive = false;
+    }
+
+    // ---- Wake Lock ----
+    let wakeLock = null;
+    function setWl(txt) { $('wl').textContent = 'Wake Lock: ' + txt; log('wakeLock ' + txt); }
+    async function requestWakeLock() {
+      if (!('wakeLock' in navigator)) { setWl('no soportado'); return; }
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        setWl('activo');
+        wakeLock.addEventListener('release', () => setWl('liberado'));
+      } catch (err) { setWl('falló: ' + err.name); }
+    }
+    function releaseWakeLock() {
+      if (wakeLock) { wakeLock.release().catch(() => {}); wakeLock = null; }
+    }
+
+    let engine = null;
+    function fmt(ms) {
+      const s = Math.ceil(ms / 1000);
+      return Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+    }
+    function onEvent(e) {
+      const extra = [];
+      if (e.driftMs !== undefined) extra.push('desfase=' + Math.round(e.driftMs) + 'ms');
+      if (e.skipped) extra.push('FASES OMITIDAS=' + e.skipped);
+      if (e.remainingMs !== undefined) extra.push('restante=' + Math.round(e.remainingMs) + 'ms');
+      log(e.type + (e.phase ? ' [' + e.phase + ']' : '') + ' ' + extra.join(' '));
+      // Un solo aviso por evento, aunque haya fases omitidas (sin ráfaga).
+      if (e.type === 'phase-end') alertUser('phase');
+      if (e.type === 'done') { alertUser('done'); releaseWakeLock(); setTimeout(stopTrack, 1500); }
+      snapshot();
+    }
+    function render() {
+      if (engine) {
+        $('time').textContent = fmt(engine.remainingMs());
+        $('phase').textContent = engine.state === 'idle' ? 'Listo'
+          : engine.state === 'done' ? 'Terminado'
+          : engine.current().name + (engine.state === 'paused' ? ' (en pausa)' : '');
+        $('pause').textContent = engine.state === 'paused' ? 'Reanudar' : 'Pausar';
+        $('pause').disabled = !(engine.state === 'running' || engine.state === 'paused');
+        $('reset').disabled = engine.state === 'idle';
+        $('start').disabled = engine.state === 'running' || engine.state === 'paused';
+      }
+    }
+    // El bucle solo dibuja y pide reconciliar; la fuente de verdad es el deadline.
+    setInterval(() => { if (engine) { engine.tick(); render(); } }, 100);
+
+    $('start').onclick = () => {
+      const sec = Number($('mode').value);
+      runCfg = { cycles: 3, sec, strategy: $('strategy').value };
+      engine = new SpikeEngine.Engine(SpikeEngine.buildPhases(3, sec), () => performance.now(), onEvent);
+      unlockAudio();            // el gesto del usuario habilita el audio
+      requestWakeLock();
+      startTrack(sec);          // dentro del gesto, requisito para reproducir
+      engine.start(); render();
+    };
+    function togglePause() {
+      if (engine.state === 'paused') { unlockAudio(); engine.resume(); if (trackActive) track.play(); }
+      else { engine.pause(); if (trackActive) track.pause(); }
+      render();
+    }
+    $('pause').onclick = togglePause;
+    $('reset').onclick = () => { engine.reset(); stopTrack(); releaseWakeLock(); render(); };
+    $('testSound').onclick = () => { unlockAudio(); alertUser('test'); };
+
+    document.addEventListener('visibilitychange', () => {
+      log('visibilitychange -> ' + document.visibilityState);
+      if (document.visibilityState === 'visible' && engine) {
+        engine.tick(); render();
+        logSyncB('al volver');
+        // El navegador libera el Wake Lock al ocultar la pestaña: pedirlo de nuevo.
+        if (engine.state === 'running' || engine.state === 'paused') requestWakeLock();
+      }
+    });
+    // ---- Recuperación tras recarga o cierre ----
+    (async () => {
+      let r;
+      try { r = await loadRun(); } catch (err) { log('IndexedDB: FALLÓ al leer (' + err.name + ')'); return; }
+      if (!r) return;
+      const box = $('recover'), msg = $('recoverMsg');
+      let remaining = r.remainingMs, note;
+      const name = SpikeEngine.buildPhases(r.cfg.cycles, r.cfg.sec)[r.index].name;
+      let canRestore = true;
+      if (r.state === 'running') {
+        const away = Date.now() - r.savedAtWall;
+        if (away < 0) { canRestore = false; note = 'El reloj del dispositivo parece haber retrocedido; no se puede estimar el tiempo.'; }
+        else {
+          remaining = r.remainingMs - away;
+          if (remaining <= 0) { canRestore = false; note = 'La fase "' + name + '" habría terminado hace ' + Math.round(-remaining / 1000) + ' s mientras la página estaba cerrada. No se reproducen avisos atrasados.'; }
+          else note = 'Estaba en marcha: pasaron ~' + Math.round(away / 1000) + ' s desde el último guardado. Tiempo restante ESTIMADO: ' + Math.round(remaining / 1000) + ' s.';
+        }
+      } else note = 'Estaba en pausa: tiempo restante exacto ' + Math.round(remaining / 1000) + ' s.';
+      msg.textContent = 'Sesión sin terminar en "' + name + '". ' + note;
+      $('recoverRestore').disabled = !canRestore;
+      box.hidden = false;
+      log('recuperación ofrecida: ' + note);
+      $('recoverDiscard').onclick = () => { clearRun(); box.hidden = true; log('sesión guardada descartada'); };
+      $('recoverRestore').onclick = () => {
+        runCfg = r.cfg;
+        $('mode').value = String(r.cfg.sec); $('strategy').value = r.cfg.strategy;
+        engine = new SpikeEngine.Engine(SpikeEngine.buildPhases(r.cfg.cycles, r.cfg.sec), () => performance.now(), onEvent);
+        if (r.cfg.strategy === 'B') {          // dejar la pista lista en el punto correcto; suena al Reanudar
+          let before = 0;
+          for (let i = 0; i < r.index; i++) before += engine.phases[i].ms;
+          const at = (before + engine.phases[r.index].ms - remaining) / 1000;
+          trackActive = true;
+          track.src = 'cue-' + r.cfg.sec + '.wav';
+          track.addEventListener('loadedmetadata', () => { track.currentTime = at; }, { once: true });
+        }
+        engine.restore(r.index, remaining);
+        box.hidden = true; render();
+      };
+    })();
+
+    // ---- PWA ----
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('sw.js').then((reg) => {
+        $('sw').textContent = 'Service worker: registrado (' + (reg.active ? 'activo' : 'instalando') + ')';
+        log('service worker registrado');
+      }).catch((err) => { $('sw').textContent = 'Service worker: falló (' + err.name + ')'; log('SW falló: ' + err.message); });
+    } else $('sw').textContent = 'Service worker: no soportado (¿falta HTTPS?)';
+    window.addEventListener('online', () => log('conexión: online'));
+    window.addEventListener('offline', () => log('conexión: offline'));
+
+    log('página cargada');
+  </script>
+</body>
+</html>
