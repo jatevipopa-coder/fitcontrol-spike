@@ -142,6 +142,10 @@ export class FitDb {
     });
   }
 
+  async countSessionsForTemplate(id) {
+    return this._tx(['sessions'], 'readonly', (ss) => reqP(ss.index('templateId').count(id)));
+  }
+
   // ---------- Sesiones ----------
   async getDeviceId() {
     return this._tx(['meta'], 'readwrite', async (meta) => {

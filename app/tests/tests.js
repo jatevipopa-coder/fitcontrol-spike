@@ -3,6 +3,7 @@
 import { FitDb, uuid } from '../js/db.js';
 import { validateTemplate, validateEntry } from '../js/validate.js';
 import { canTransition, transition } from '../js/session-state.js';
+import { newDraft, draftFromTemplate, defaultItem, toNum, moveItem, removeItem, draftToInput, describeError } from '../js/draft.js';
 
 const EX = [
   { id: 'ex-a', name: 'Ejercicio A', modality: 'reps' },
@@ -115,6 +116,45 @@ export const TESTS = [
       ok(e.description && e.description.length > 20, e.id + ' descripción');
     }
     ok(data.reviewNote, 'nota de revisión editorial');
+  }],
+
+  // ---------- editor (lógica pura) ----------
+  ['editor: toNum interpreta coma decimal, vacío y basura', () => {
+    eq(toNum('62,5'), 62.5); eq(toNum(' 8 '), 8); eq(toNum(''), undefined); eq(toNum(null), undefined);
+    ok(Number.isNaN(toNum('abc')) && Number.isNaN(toNum('1e3')) && Number.isNaN(toNum('1,2,3')) && Number.isNaN(toNum('0x10')));
+  }],
+  ['editor: valores por defecto según modalidad', () => {
+    eq(defaultItem({ id: 'ex-a', modality: 'reps' }), { exerciseId: 'ex-a', sets: 3, reps: 8, restSec: 90 });
+    eq(defaultItem({ id: 'ex-b', modality: 'time' }), { exerciseId: 'ex-b', sets: 3, durationSec: 45, restSec: 60 });
+  }],
+  ['editor: mover y quitar no mutan y respetan los bordes', () => {
+    const a = [{ n: 1 }, { n: 2 }, { n: 3 }];
+    eq(moveItem(a, 0, 1).map((x) => x.n), [2, 1, 3]);
+    eq(moveItem(a, 0, -1).map((x) => x.n), [1, 2, 3]);
+    eq(moveItem(a, 2, 1).map((x) => x.n), [1, 2, 3]);
+    eq(a.map((x) => x.n), [1, 2, 3], 'el original no cambia');
+    eq(removeItem(a, 1).map((x) => x.n), [1, 3]);
+  }],
+  ['editor: el borrador válido pasa la validación; un campo ilegible no', () => {
+    const d = newDraft(); d.name = 'Pierna';
+    d.items = [defaultItem(exMap.get('ex-a')), defaultItem(exMap.get('ex-b'))];
+    ok(validateTemplate(draftToInput(d), exMap).ok);
+    d.items[0].sets = toNum('abc');
+    const v = validateTemplate(draftToInput(d), exMap);
+    ok(!v.ok && v.errors[0].field === 'items[0].sets');
+    d.items[0].sets = toNum('3'); d.items[0].reps = toNum('');   // reps vacío en ejercicio por repeticiones
+    ok(!validateTemplate(draftToInput(d), exMap).ok);
+  }],
+  ['editor: mensajes de error legibles', () => {
+    const items = [{ exerciseId: 'ex-a' }];
+    const nm = (id) => exMap.get(id)?.name;
+    eq(describeError({ field: 'items[0].sets', message: 'x' }, items, nm), 'Ejercicio 1 (Ejercicio A) · Series: x');
+    eq(describeError({ field: 'name', message: 'y' }, items, nm), 'Nombre: y');
+  }],
+  ['editor: draftFromTemplate copia, no comparte referencias', () => {
+    const t = { id: 'i', name: 'N', goal: undefined, items: [{ exerciseId: 'ex-a', sets: 1, reps: 1, restSec: 0 }] };
+    const d = draftFromTemplate(t); d.items[0].sets = 9;
+    eq(t.items[0].sets, 1); eq(d.goal, '');
   }],
 
   // ---------- base de datos ----------
