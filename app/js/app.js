@@ -4,6 +4,7 @@ import { validateTemplate } from './validate.js';
 import { ValidationError } from './errors.js';
 import { newDraft, draftFromTemplate, defaultItem, toNum, moveItem, removeItem, draftToInput, describeError } from './draft.js';
 import { h, clear, norm } from './ui.js';
+import { renderTraining, leave as leaveTraining } from './train.js';
 
 const db = new FitDb('fitcontrol');
 const root = document.getElementById('app');
@@ -35,7 +36,29 @@ function installBanner() {
     'Instálala (en iPhone: Compartir → «Añadir a pantalla de inicio») y ábrela desde el icono.');
 }
 
-function card(t) {
+async function startTraining(t) {
+  try { const s = await db.startSession(t.id); go('#/train/' + s.id); }
+  catch (e) { toast(e.message); }
+}
+
+async function abandonActive(s) {
+  const n = (await db.getSession(s.id)).entries.length;
+  const msg = n > 0 ? '¿Abandonar el entreno en curso? Se conservan las ' + n + ' series ya registradas.' : 'No hay series registradas: se descartará el entreno en curso.';
+  if (!confirm(msg)) return;
+  try { await db.setSessionState(s.id, n > 0 ? 'abandoned' : 'cancelled'); toast('Entreno cerrado'); await renderList(); }
+  catch (e) { toast('No se pudo cerrar: ' + e.message); }
+}
+
+function activeBanner(s) {
+  if (!s) return null;
+  return h('div', { class: 'active-banner', 'data-test': 'active-banner' },
+    h('p', {}, h('strong', {}, 'Entreno en curso: '), s.templateSnapshot.name),
+    h('div', { class: 'row' },
+      h('button', { class: 'btn primary', type: 'button', 'data-act': 'continue', onclick: () => go('#/train/' + s.id) }, 'Continuar'),
+      h('button', { class: 'btn danger', type: 'button', 'data-act': 'abandon-active', onclick: () => abandonActive(s) }, 'Abandonar')));
+}
+
+function card(t, active) {
   const names = t.items.map((i) => exName(i.exerciseId) ?? '?');
   const preview = names.slice(0, 4).join(' · ') + (names.length > 4 ? ' · …' : '');
   return h('li', { class: 'card', 'data-id': t.id },
@@ -43,6 +66,7 @@ function card(t) {
     h('p', { class: 'meta' }, t.items.length + (t.items.length === 1 ? ' ejercicio' : ' ejercicios') + ' · versión ' + t.version),
     h('p', { class: 'meta' }, preview),
     h('div', { class: 'row' },
+      h('button', { class: 'btn primary', type: 'button', 'data-act': 'train', disabled: !!active, title: active ? 'Ya hay un entreno en curso' : null, onclick: () => startTraining(t) }, 'Entrenar'),
       h('button', { class: 'btn', type: 'button', 'data-act': 'edit', onclick: () => go('#/edit/' + t.id) }, 'Editar'),
       h('button', { class: 'btn', type: 'button', 'data-act': 'dup', onclick: () => duplicate(t) }, 'Duplicar'),
       h('button', { class: 'btn danger', type: 'button', 'data-act': 'archive', onclick: () => archive(t) }, 'Archivar')));
@@ -60,14 +84,16 @@ async function archive(t) {
 
 async function renderList() {
   const templates = await db.listTemplates();
+  const active = await db.getActiveSession();
   clear(root);
   root.append(
     h('div', { class: 'bar' },
       h('h1', {}, 'Mis rutinas'),
       h('button', { class: 'btn primary', type: 'button', 'data-act': 'new', onclick: () => go('#/new') }, 'Nueva rutina')),
     installBanner(),
+    activeBanner(active) ?? document.createDocumentFragment(),
     templates.length
-      ? h('ul', { class: 'cards' }, templates.map(card))
+      ? h('ul', { class: 'cards' }, templates.map((t) => card(t, active)))
       : h('div', { class: 'empty', 'data-test': 'empty' },
         h('p', {}, 'Aún no tienes rutinas.'),
         h('button', { class: 'btn primary', type: 'button', 'data-act': 'new-empty', onclick: () => go('#/new') }, 'Crear mi primera rutina')));
@@ -225,8 +251,10 @@ async function renderEditor(id) {
 // ---------------------------------------------------------------- rutas y arranque
 async function route() {
   const hash = location.hash || '#/';
+  if (!hash.startsWith('#/train/')) leaveTraining();      // suelta audio, temporizador y bloqueo de pantalla
   try {
-    if (hash === '#/' || hash === '#') await renderList();
+    if (hash.startsWith('#/train/')) await renderTraining({ db, root, go, toast }, decodeURIComponent(hash.slice(8)));
+    else if (hash === '#/' || hash === '#') await renderList();
     else if (hash === '#/new') await renderEditor(null);
     else if (hash.startsWith('#/edit/')) await renderEditor(decodeURIComponent(hash.slice(7)));
     else go('#/');

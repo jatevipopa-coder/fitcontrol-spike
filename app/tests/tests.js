@@ -3,6 +3,8 @@
 import { FitDb, uuid } from '../js/db.js';
 import { validateTemplate, validateEntry } from '../js/validate.js';
 import { canTransition, transition } from '../js/session-state.js';
+import { buildPlan, isFinished, restAfter, suggestFor, cueOffset, summarize, fmtClock, fmtLoad } from '../js/runner.js';
+import { Engine } from '../js/engine.js';
 import { newDraft, draftFromTemplate, defaultItem, toNum, moveItem, removeItem, draftToInput, describeError } from '../js/draft.js';
 
 const EX = [
@@ -157,6 +159,63 @@ export const TESTS = [
     eq(t.items[0].sets, 1); eq(d.goal, '');
   }],
 
+  // ---------- entreno (lógica pura) ----------
+  ['entreno: buildPlan expande series en orden y marca la última', () => {
+    const snap = { items: [
+      { exerciseId: 'ex-a', exerciseName: 'A', modality: 'reps', sets: 2, reps: 8, restSec: 90, targetLoadKg: 60 },
+      { exerciseId: 'ex-b', exerciseName: 'B', modality: 'time', sets: 1, durationSec: 45, restSec: 60 },
+    ] };
+    const steps = buildPlan(snap);
+    eq(steps.map((s) => s.exerciseId + '#' + s.setNumber), ['ex-a#1', 'ex-a#2', 'ex-b#1']);
+    eq(steps.map((s) => s.isLast), [false, false, true]);
+    eq(steps[0].totalSets, 2); eq(steps[2].itemCount, 2); eq(steps[2].targetDurationSec, 45); eq(steps[0].targetLoadKg, 60);
+    eq(restAfter(steps[1]), 90); eq(restAfter(steps[2]), 0, 'sin descanso tras la última serie');
+    ok(!isFinished(steps, 2) && isFinished(steps, 3));
+  }],
+  ['entreno: el mismo ejercicio repetido en la rutina genera pasos distintos', () => {
+    const it = { exerciseId: 'ex-a', exerciseName: 'A', modality: 'reps', sets: 2, reps: 5, restSec: 30 };
+    const steps = buildPlan({ items: [it, it] });
+    eq(steps.length, 4); eq(steps.map((s) => s.itemIndex), [0, 0, 1, 1]);
+  }],
+  ['entreno: el último peso manda sobre el objetivo; sin historial usa el objetivo', () => {
+    const step = { targetReps: 8, targetLoadKg: 60, targetDurationSec: null };
+    eq(suggestFor(step, { actualLoadKg: 62.5 }).loadKg, 62.5);
+    eq(suggestFor(step, null).loadKg, 60); eq(suggestFor(step, null).fromHistory, false);
+    eq(suggestFor({ targetReps: 8, targetLoadKg: null }, { actualLoadKg: null }).loadKg, null);
+  }],
+  ['entreno: posición de la pista según el descanso (salto a 300−D)', () => {
+    eq(cueOffset(15), 285); eq(cueOffset(120), 180); eq(cueOffset(300), 0);
+    eq(cueOffset(0), null); eq(cueOffset(301), null); eq(cueOffset(NaN), null); eq(cueOffset(2.5), null);
+  }],
+  ['entreno: resumen cuenta hechas, omitidas, pendientes y volumen solo con peso', () => {
+    const steps = new Array(6).fill(0).map((_, i) => ({ index: i }));
+    const entries = [
+      { completed: true, actualReps: 8, actualLoadKg: 60 },
+      { completed: true, actualReps: 6, actualLoadKg: 62.5 },
+      { completed: false },
+      { completed: true, actualDurationMs: 45000 },            // sin peso: no suma volumen
+    ];
+    const s = summarize({ startedAt: '2026-01-01T10:00:00.000Z', endedAt: '2026-01-01T10:45:30.000Z' }, entries, steps);
+    eq([s.planned, s.completed, s.skipped, s.pending], [6, 3, 1, 2]);
+    eq(s.volumeKg, 855, 'volumen'); eq(s.wallSeconds, 2730);
+  }],
+  ['entreno: formato de reloj y de peso', () => {
+    eq(fmtClock(65), '1:05'); eq(fmtClock(0), '0:00'); eq(fmtClock(3600), '60:00'); eq(fmtClock(59.2), '1:00'); eq(fmtClock(-3), '0:00');
+    eq(fmtLoad(62.5), '62,5'); eq(fmtLoad(60), '60'); eq(fmtLoad(null), '');
+  }],
+  ['motor (ES module): pausa conserva el tiempo y se completa una sola vez', () => {
+    let t = 1000; const ev = [];
+    const e = new Engine([{ name: 'D', ms: 10000 }], () => t, (x) => ev.push(x.type));
+    e.start(); t += 4000; e.pause(); t += 30000;
+    eq(e.remainingMs(), 6000); e.resume(); t += 5999; e.tick(); eq(e.state, 'running');
+    t += 1; e.tick(); eq(e.state, 'done'); eq(ev.filter((x) => x === 'done').length, 1);
+    e.tick(); eq(ev.filter((x) => x === 'done').length, 1, 'no repite el evento');
+  }],
+  ['motor: elapsedMs refleja lo transcurrido (para "terminar ya")', () => {
+    let t = 0; const e = new Engine([{ name: 'P', ms: 45000 }], () => t);
+    e.start(); t += 12300; eq(e.elapsedMs(), 12300);
+  }],
+
   // ---------- base de datos ----------
   ['siembra idempotente: sembrar dos veces no duplica', () => withDb(async (db) => {
     await db.seedExercises(EX); await db.seedExercises(EX);
@@ -268,6 +327,46 @@ export const TESTS = [
     const last = await db.lastEntryForExercise('ex-a');
     eq(last.actualLoadKg, 62.5); eq(last.setNumber, 2);
     eq(await db.lastEntryForExercise('ex-c'), null);
+  })],
+  ['entreno completo contra la BD: un registro por paso, progreso = nº de registros, resumen coherente', () => withDb(async (db) => {
+    const t = await db.createTemplate({ name: 'Prueba', items: [
+      { exerciseId: 'ex-a', sets: 3, reps: 8, restSec: 90, targetLoadKg: 60 },
+      { exerciseId: 'ex-b', sets: 1, durationSec: 45, restSec: 60 },
+    ] });
+    const s = await db.startSession(t.id);
+    const steps = buildPlan(s.templateSnapshot);
+    eq(steps.length, 4);
+    const log = [];
+    for (let i = 0; i < steps.length; i++) {
+      const cur = steps[(await db.getSession(s.id)).entries.length];
+      eq(cur.index, i, 'el paso actual coincide con el nº de registros');
+      const input = { id: uuid(), exerciseId: cur.exerciseId, setNumber: cur.setNumber };
+      if (i === 1) Object.assign(input, { completed: false });                                  // omitida
+      else if (cur.modality === 'time') Object.assign(input, { completed: true, actualDurationMs: 45000 });
+      else Object.assign(input, { completed: true, actualReps: 8, actualLoadKg: 60 + i });
+      log.push(await db.addEntry(s.id, input));
+      await sleep(3);
+    }
+    eq(isFinished(steps, (await db.getSession(s.id)).entries.length), true);
+    const done = await db.setSessionState(s.id, 'completed');
+    const full = await db.getSession(s.id);
+    eq(full.entries.map((e) => e.sequence), [1, 2, 3, 4]);
+    const sum = summarize(done, full.entries, steps);
+    eq([sum.completed, sum.skipped, sum.pending], [3, 1, 0]);
+    eq(sum.volumeKg, 8 * 60 + 8 * 62, 'volumen: solo series con peso');
+    eq((await db.lastEntryForExercise('ex-a')).actualLoadKg, 62, 'último peso = el de la última serie hecha');
+  })],
+  ['reabrir un entreno a medias: el progreso se reconstruye desde lo guardado', () => withDb(async (db, name) => {
+    const t = await db.createTemplate({ name: 'Prueba', items: [{ exerciseId: 'ex-a', sets: 3, reps: 8, restSec: 90 }] });
+    const s = await db.startSession(t.id);
+    await db.addEntry(s.id, { exerciseId: 'ex-a', setNumber: 1, completed: true, actualReps: 8 });
+    db.close();
+    const again = new FitDb(name);
+    const act = await again.getActiveSession();
+    const got = await again.getSession(act.id);
+    const steps = buildPlan(got.templateSnapshot);
+    eq(steps[got.entries.length].setNumber, 2, 'continúa en la serie 2');
+    again.close();
   })],
   ['persistencia: cerrar y reabrir la base conserva todo', () => withDb(async (db, name) => {
     const t = await db.createTemplate(good());
