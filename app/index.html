@@ -17,6 +17,9 @@
 <body>
   <h1>FitControl · tramo 1b: modelo de datos</h1>
   <p>Página de control, no es la interfaz final. Los datos de prueba se guardan en la base real <code>fitcontrol</code> de este dispositivo.</p>
+  <h1 style="font-size:.95rem">Diagnóstico de almacenamiento</h1>
+  <pre id="diag" style="font:12px/1.45 ui-monospace,monospace;background:#8882;padding:8px;white-space:pre-wrap">cargando…</pre>
+  <div class="row"><button id="btnPersist">Pedir almacenamiento persistente</button></div>
   <div class="row">
     <button id="btnTests">Ejecutar pruebas</button>
     <button id="btnSeed">Sembrar ejercicios</button>
@@ -100,6 +103,33 @@
       db.close(); await FitDb.deleteDatabase('fitcontrol'); db = new FitDb('fitcontrol');
       log('base de datos borrada.');
     });
+    // ---- Diagnóstico: ¿sobrevive el almacenamiento entre aperturas? ----
+    // Cada carga suma 1 a un contador en IndexedDB y a otro en localStorage. Si al reabrir vuelven a 1,
+    // el navegador borró ese almacenamiento (pestaña privada, navegador interno de una app, limpieza...).
+    async function showDiag() {
+      const L = [];
+      const iso = (s) => String(s).slice(0, 19).replace('T', ' ');
+      try { const c = await db.bumpCounter('boots'); L.push('arranque nº (IndexedDB): ' + c.n + ' · primero ' + iso(c.first) + ' UTC · último ' + iso(c.last) + ' UTC'); }
+      catch (e) { L.push('IndexedDB: ERROR ' + e.name + ': ' + e.message); }
+      try {
+        const raw = localStorage.getItem('fc-boots');
+        const c = raw ? JSON.parse(raw) : { n: 0, first: new Date().toISOString() };
+        c.n += 1; c.last = new Date().toISOString();
+        localStorage.setItem('fc-boots', JSON.stringify(c));
+        L.push('arranque nº (localStorage): ' + c.n + ' · primero ' + iso(c.first) + ' UTC');
+      } catch (e) { L.push('localStorage: ERROR ' + e.name); }
+      try { L.push('almacenamiento persistente: ' + (navigator.storage?.persisted ? await navigator.storage.persisted() : 'no disponible')); } catch { L.push('persisted(): error'); }
+      try { if (navigator.storage?.estimate) { const e = await navigator.storage.estimate(); L.push('uso: ' + Math.round(e.usage / 1024) + ' KB de ~' + Math.round(e.quota / 1048576) + ' MB'); } } catch { /* sin estimate */ }
+      L.push('modo: ' + ((navigator.standalone || matchMedia('(display-mode: standalone)').matches) ? 'app instalada (pantalla de inicio)' : 'pestaña de navegador'));
+      try { if (indexedDB.databases) L.push('bases visibles: ' + (await indexedDB.databases()).map((d) => d.name).join(', ')); } catch { /* sin databases() */ }
+      $('diag').textContent = L.join('\n');
+    }
+    $('btnPersist').onclick = () => guard(async () => {
+      if (!navigator.storage?.persist) { log('persist() no disponible en este navegador'); return; }
+      log('persist() → ' + await navigator.storage.persist()); showDiag();
+    });
+    showDiag();
+
     log('lista. Pulsa "Ejecutar pruebas" o prueba los botones en orden.');
   </script>
 </body>

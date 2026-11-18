@@ -228,6 +228,16 @@ export class FitDb {
     return list.filter((e) => e.completed).sort((a, b) => b.createdAt.localeCompare(a.createdAt))[0] ?? null;
   }
 
+  /** Contador de arranques guardado en IndexedDB: sirve para diagnosticar si el almacenamiento sobrevive. */
+  async bumpCounter(key) {
+    return this._tx(['meta'], 'readwrite', async (meta) => {
+      const cur = (await reqP(meta.get(key))) ?? { n: 0, first: nowIso() };
+      cur.n += 1; cur.last = nowIso();
+      await reqP(meta.put(cur, key));
+      return cur;
+    });
+  }
+
   async counts() {
     return this._tx(['exercises', 'templates', 'sessions', 'entries'], 'readonly', async (...st) => {
       const n = await Promise.all(st.map((s) => reqP(s.count())));
