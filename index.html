@@ -19,7 +19,7 @@
   </style>
 </head>
 <body>
-  <h1>Spike temporizador · Día 5 · v3 (descanso libre)</h1>
+  <h1>Spike temporizador · Día 5 · v4 (sesión de audio)</h1>
   <div id="recover" hidden style="border:2px solid #d9a400;padding:8px;margin:8px 0">
     <div id="recoverMsg"></div>
     <div class="row">
@@ -55,6 +55,15 @@
         <option value="B">B: pista larga + Media Session</option>
       </select>
     </label>
+    <label>Sesión de audio
+      <select id="audioType">
+        <option value="auto">auto (como la app actual)</option>
+        <option value="playback">playback</option>
+        <option value="ambient">ambient (se mezcla)</option>
+        <option value="transient">transient (pausa y devuelve)</option>
+        <option value="transient-solo">transient-solo</option>
+      </select>
+    </label>
     <button id="testSound" type="button">Probar sonido</button>
   </div>
   <div id="wl">Wake Lock: sin solicitar</div>
@@ -77,6 +86,14 @@
       const s = ((performance.now() - t0) / 1000).toFixed(2).padStart(7);
       logEl.textContent += s + 's  ' + msg + '\n';
       logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // ---- Sesión de audio (Audio Session API, solo WebKit): cómo convive nuestro sonido con otras apps ----
+    function applyAudioType() {
+      const v = $('audioType').value;
+      if (!('audioSession' in navigator)) { log('audioSession: NO soportada en este navegador (se ignora "' + v + '")'); return; }
+      try { navigator.audioSession.type = v; log('audioSession.type = ' + navigator.audioSession.type); }
+      catch (e) { log('audioSession ERROR al fijar "' + v + '": ' + e.message); }
     }
 
     // ---- Audio (estrategia A) ----
@@ -282,6 +299,7 @@
       resetStats();
       const phases = isRest ? [{ name: 'Descanso libre', ms: sec * 1000 }] : SpikeEngine.buildPhases(cycles, sec);
       engine = new SpikeEngine.Engine(phases, () => performance.now(), onEvent);
+      applyAudioType();         // antes de reproducir nada
       unlockAudio();            // el gesto del usuario habilita el audio
       requestWakeLock();
       startTrack(cycles, sec, isRest);  // dentro del gesto, requisito para reproducir
@@ -294,7 +312,7 @@
     }
     $('pause').onclick = togglePause;
     $('reset').onclick = () => { engine.reset(); stopTrack(); releaseWakeLock(); render(); };
-    $('testSound').onclick = () => { unlockAudio(); alertUser('test'); };
+    $('testSound').onclick = () => { applyAudioType(); unlockAudio(); alertUser('test'); };
     $('summary').onclick = printSummary;
 
     document.addEventListener('visibilitychange', () => {
@@ -361,6 +379,11 @@
     } else $('sw').textContent = 'Service worker: no soportado (¿falta HTTPS?)';
     window.addEventListener('online', () => log('conexión: online'));
     window.addEventListener('offline', () => log('conexión: offline'));
+
+    if ('audioSession' in navigator) {
+      log('audioSession soportada · type=' + navigator.audioSession.type + ' · state=' + navigator.audioSession.state);
+      try { navigator.audioSession.addEventListener('statechange', () => log('audioSession.state = ' + navigator.audioSession.state)); } catch { /* sin evento */ }
+    } else log('audioSession: NO soportada en este navegador');
 
     log('página cargada');
   </script>
