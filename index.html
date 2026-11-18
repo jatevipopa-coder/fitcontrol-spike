@@ -19,7 +19,7 @@
   </style>
 </head>
 <body>
-  <h1>Spike temporizador · Día 5 · v4 (sesión de audio)</h1>
+  <h1>Spike temporizador · Día 5 · v5 (audio y Spotify)</h1>
   <div id="recover" hidden style="border:2px solid #d9a400;padding:8px;margin:8px 0">
     <div id="recoverMsg"></div>
     <div class="row">
@@ -64,6 +64,8 @@
         <option value="transient-solo">transient-solo</option>
       </select>
     </label>
+    <label><input type="checkbox" id="useMS" checked> Usar Media Session</label>
+    <label><input type="checkbox" id="releaseAudio"> Liberar audio al terminar</label>
     <button id="testSound" type="button">Probar sonido</button>
   </div>
   <div id="wl">Wake Lock: sin solicitar</div>
@@ -230,16 +232,22 @@
       } else track.currentTime = 0;
       track.play().then(() => log('B: reproduciendo pista ' + (isRest ? 'cue-rest.wav' : CUES[cycles + ':' + sec])))
         .catch((err) => log('B: no pudo reproducir: ' + err.name));
-      if ('mediaSession' in navigator) {
+      if ($('useMS').checked && 'mediaSession' in navigator) {
         navigator.mediaSession.metadata = new MediaMetadata({ title: 'Descanso', artist: 'FitControl spike' });
         navigator.mediaSession.setActionHandler('play', () => { if (engine.state === 'paused') togglePause(); });
         navigator.mediaSession.setActionHandler('pause', () => { if (engine.state === 'running') togglePause(); });
         log('Media Session configurada');
-      } else log('Media Session no soportada');
+      } else log('Media Session NO usada (' + ($('useMS').checked ? 'no soportada' : 'desactivada') + ')');
     }
     function stopTrack() {
       if (!trackActive) return;
       track.pause(); track.currentTime = 0; trackActive = false;
+      if ($('releaseAudio').checked) {
+        // Soltar el elemento y la "reproducción actual" para que iOS pueda devolver el audio a otras apps.
+        track.removeAttribute('src'); track.load();
+        if ('mediaSession' in navigator) { try { navigator.mediaSession.metadata = null; navigator.mediaSession.playbackState = 'none'; } catch { /* sin soporte */ } }
+        log('audio liberado');
+      }
     }
 
     // ---- Wake Lock ----
