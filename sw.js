@@ -1,19 +1,24 @@
 // Service worker del spike. Cache-first versionado.
 // Decisión consciente: NO se llama a skipWaiting() ni clients.claim(), para que una versión nueva
 // no tome el control en mitad de un entrenamiento; se activa al cerrar todas las pestañas.
-const VERSION = 'spike-v1';
+const VERSION = 'spike-v2';
 const ASSETS = [
   './', './index.html', './engine.js', './manifest.webmanifest',
-  './icon-192.png', './icon-512.png', './cue-10.wav', './cue-30.wav',
+  './icon-192.png', './icon-512.png', './cue-10.wav', './cue-30.wav', './cue-10x90.wav',
 ];
 
 self.addEventListener('install', (event) => {
+  // EXCEPCIÓN de v2 (solo spike): skipWaiting para que el teléfono tome esta versión sin pasos extra.
+  // En la app real NO se activará una versión nueva durante un entrenamiento (ver Plan Maestro §10.5).
+  self.skipWaiting();
   event.waitUntil(caches.open(VERSION).then((c) => c.addAll(ASSETS)));
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => Promise.all(keys.filter((k) => k !== VERSION).map((k) => caches.delete(k))))
+    caches.keys()
+      .then((keys) => Promise.all(keys.filter((k) => k !== VERSION).map((k) => caches.delete(k))))
+      .then(() => self.clients.claim())
   );
 });
 

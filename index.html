@@ -19,7 +19,7 @@
   </style>
 </head>
 <body>
-  <h1>Spike temporizador · Día 4 (+ IndexedDB, PWA)</h1>
+  <h1>Spike temporizador · Día 5 · v2 (prueba larga)</h1>
   <div id="recover" hidden style="border:2px solid #d9a400;padding:8px;margin:8px 0">
     <div id="recoverMsg"></div>
     <div class="row">
@@ -31,8 +31,9 @@
   <div class="row">
     <label>Modo
       <select id="mode">
-        <option value="30">3 × 30 s</option>
-        <option value="10">3 × 10 s (rápido)</option>
+        <option value="3:30">3 × 30 s</option>
+        <option value="3:10">3 × 10 s (rápido)</option>
+        <option value="10:90">10 × 90 s (15 min, prueba larga)</option>
       </select>
     </label>
     <label>Aviso
@@ -51,6 +52,7 @@
     <button id="start">Iniciar</button>
     <button id="pause" disabled>Pausar</button>
     <button id="reset" disabled>Reiniciar</button>
+    <button id="summary" type="button">Resumen</button>
   </div>
   <div id="log" aria-live="off"></div>
 
@@ -109,6 +111,22 @@
       }
     }
 
+    // ---- Estadísticas para reportar la prueba larga ----
+    let stats;
+    function resetStats() {
+      stats = { hiddenAt: null, hiddenCount: 0, hiddenTotal: 0, hiddenMax: 0, ends: 0, maxDrift: 0, skipped: 0, unexpectedPause: 0, startedAt: performance.now() };
+    }
+    resetStats();
+    function printSummary() {
+      const s = stats;
+      const hiddenNow = s.hiddenAt !== null ? (performance.now() - s.hiddenAt) / 1000 : 0;
+      log('RESUMEN: duración=' + ((performance.now() - s.startedAt) / 1000).toFixed(0) + 's' +
+        ' | bloqueos=' + s.hiddenCount + ' tiempo oculta=' + (s.hiddenTotal / 1000 + hiddenNow).toFixed(0) + 's' +
+        ' mayor=' + (Math.max(s.hiddenMax / 1000, hiddenNow)).toFixed(0) + 's' +
+        ' | fines de fase=' + s.ends + ' mayor desfase=' + Math.round(s.maxDrift) + 'ms' +
+        ' | fases omitidas=' + s.skipped + ' | pausas inesperadas del audio=' + s.unexpectedPause);
+    }
+
     // ---- Persistencia (IndexedDB) ----
     function idb() {
       return new Promise((res, rej) => {
@@ -148,7 +166,9 @@
     ['playing', 'pause', 'ended', 'error', 'stalled', 'waiting'].forEach((ev) =>
       track.addEventListener(ev, () => {
         if (!trackActive) return;
-        const note = ev === 'pause' && engine && engine.state === 'running' ? ' (INESPERADO: motor sigue corriendo)' : '';
+        const unexpected = ev === 'pause' && engine && engine.state === 'running';
+        if (unexpected) stats.unexpectedPause += 1;
+        const note = unexpected ? ' (INESPERADO: motor sigue corriendo)' : '';
         log('audio ' + ev + ' t=' + track.currentTime.toFixed(2) + note);
       }));
     function engineElapsedSec() {
@@ -163,12 +183,13 @@
       log('B ' + label + ': audio=' + track.currentTime.toFixed(2) + 's motor=' + engineElapsedSec().toFixed(2) +
         's diferencia=' + d.toFixed(2) + 's paused=' + track.paused);
     }
-    function startTrack(sec) {
+    const CUES = { '3:10': 'cue-10.wav', '3:30': 'cue-30.wav', '10:90': 'cue-10x90.wav' };
+    function startTrack(cycles, sec) {
       trackActive = $('strategy').value === 'B';
       if (!trackActive) return;
-      track.src = 'cue-' + sec + '.wav';
+      track.src = CUES[cycles + ':' + sec];
       track.currentTime = 0;
-      track.play().then(() => log('B: reproduciendo pista cue-' + sec + '.wav'))
+      track.play().then(() => log('B: reproduciendo pista ' + CUES[cycles + ':' + sec]))
         .catch((err) => log('B: no pudo reproducir: ' + err.name));
       if ('mediaSession' in navigator) {
         navigator.mediaSession.metadata = new MediaMetadata({ title: 'Descanso', artist: 'FitControl spike' });
@@ -211,6 +232,10 @@
       // Un solo aviso por evento, aunque haya fases omitidas (sin ráfaga).
       if (e.type === 'phase-end') alertUser('phase');
       if (e.type === 'done') { alertUser('done'); releaseWakeLock(); setTimeout(stopTrack, 1500); }
+      if (e.type === 'phase-end' || e.type === 'done') {
+        stats.ends += 1; stats.maxDrift = Math.max(stats.maxDrift, e.driftMs || 0); stats.skipped += e.skipped || 0;
+      }
+      if (e.type === 'done') printSummary();
       snapshot();
     }
     function render() {
@@ -229,12 +254,13 @@
     setInterval(() => { if (engine) { engine.tick(); render(); } }, 100);
 
     $('start').onclick = () => {
-      const sec = Number($('mode').value);
-      runCfg = { cycles: 3, sec, strategy: $('strategy').value };
-      engine = new SpikeEngine.Engine(SpikeEngine.buildPhases(3, sec), () => performance.now(), onEvent);
+      const [cycles, sec] = $('mode').value.split(':').map(Number);
+      runCfg = { cycles, sec, strategy: $('strategy').value };
+      resetStats();
+      engine = new SpikeEngine.Engine(SpikeEngine.buildPhases(cycles, sec), () => performance.now(), onEvent);
       unlockAudio();            // el gesto del usuario habilita el audio
       requestWakeLock();
-      startTrack(sec);          // dentro del gesto, requisito para reproducir
+      startTrack(cycles, sec);  // dentro del gesto, requisito para reproducir
       engine.start(); render();
     };
     function togglePause() {
@@ -245,9 +271,16 @@
     $('pause').onclick = togglePause;
     $('reset').onclick = () => { engine.reset(); stopTrack(); releaseWakeLock(); render(); };
     $('testSound').onclick = () => { unlockAudio(); alertUser('test'); };
+    $('summary').onclick = printSummary;
 
     document.addEventListener('visibilitychange', () => {
       log('visibilitychange -> ' + document.visibilityState);
+      if (document.visibilityState === 'hidden') { stats.hiddenAt = performance.now(); stats.hiddenCount += 1; }
+      else if (stats.hiddenAt !== null) {
+        const d = performance.now() - stats.hiddenAt;
+        stats.hiddenTotal += d; stats.hiddenMax = Math.max(stats.hiddenMax, d); stats.hiddenAt = null;
+        log('estuvo oculta ' + (d / 1000).toFixed(1) + ' s');
+      }
       if (document.visibilityState === 'visible' && engine) {
         engine.tick(); render();
         logSyncB('al volver');
@@ -280,14 +313,14 @@
       $('recoverDiscard').onclick = () => { clearRun(); box.hidden = true; log('sesión guardada descartada'); };
       $('recoverRestore').onclick = () => {
         runCfg = r.cfg;
-        $('mode').value = String(r.cfg.sec); $('strategy').value = r.cfg.strategy;
+        $('mode').value = r.cfg.cycles + ':' + r.cfg.sec; $('strategy').value = r.cfg.strategy;
         engine = new SpikeEngine.Engine(SpikeEngine.buildPhases(r.cfg.cycles, r.cfg.sec), () => performance.now(), onEvent);
         if (r.cfg.strategy === 'B') {          // dejar la pista lista en el punto correcto; suena al Reanudar
           let before = 0;
           for (let i = 0; i < r.index; i++) before += engine.phases[i].ms;
           const at = (before + engine.phases[r.index].ms - remaining) / 1000;
           trackActive = true;
-          track.src = 'cue-' + r.cfg.sec + '.wav';
+          track.src = CUES[r.cfg.cycles + ':' + r.cfg.sec];
           track.addEventListener('loadedmetadata', () => { track.currentTime = at; }, { once: true });
         }
         engine.restore(r.index, remaining);
