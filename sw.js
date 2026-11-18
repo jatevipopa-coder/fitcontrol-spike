@@ -1,7 +1,7 @@
 // Service worker del spike. Cache-first versionado.
 // Decisión consciente: NO se llama a skipWaiting() ni clients.claim(), para que una versión nueva
 // no tome el control en mitad de un entrenamiento; se activa al cerrar todas las pestañas.
-const VERSION = 'spike-v3';
+const VERSION = 'spike-v4';
 const ASSETS = [
   './', './index.html', './engine.js', './manifest.webmanifest',
   './icon-192.png', './icon-512.png', './cue-10.wav', './cue-30.wav', './cue-10x90.wav', './cue-rest.wav',
@@ -41,7 +41,11 @@ async function rangeResponse(request, hit) {
 
 self.addEventListener('fetch', (event) => {
   const req = event.request;
-  if (req.method !== 'GET' || new URL(req.url).origin !== location.origin) return;
+  const url = new URL(req.url);
+  if (req.method !== 'GET' || url.origin !== location.origin) return;
+  // v4: la app real vive en ./app/ dentro de este mismo sitio; este SW del spike NO debe tocarla
+  // (antes, una navegación fuera de la caché devolvía el index.html del spike).
+  if (url.pathname.startsWith(new URL('./app/', self.registration.scope).pathname)) return;
   event.respondWith((async () => {
     const cache = await caches.open(VERSION);
     let hit = await cache.match(req.url, { ignoreSearch: true });

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FitControl · datos (1b)</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; margin: 0; padding: 16px; max-width: 520px; margin-inline: auto; }
+    h1 { font-size: 1.05rem; margin: 0 0 4px; }
+    p { margin: 4px 0 12px; font-size: .9rem; opacity: .8; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; margin: 8px 0; }
+    button { font-size: 1rem; min-height: 48px; padding: 0 14px; }
+    #out { font: 12px/1.45 ui-monospace, monospace; background: #8882; padding: 8px; min-height: 260px; max-height: 60vh; overflow: auto; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>FitControl · tramo 1b: modelo de datos</h1>
+  <p>Página de control, no es la interfaz final. Los datos de prueba se guardan en la base real <code>fitcontrol</code> de este dispositivo.</p>
+  <div class="row">
+    <button id="btnTests">Ejecutar pruebas</button>
+    <button id="btnSeed">Sembrar ejercicios</button>
+    <button id="btnRoutine">Crear rutina de ejemplo</button>
+  </div>
+  <div class="row">
+    <button id="btnStart">Iniciar sesión de prueba</button>
+    <button id="btnEntry">Registrar una serie</button>
+    <button id="btnFinish">Terminar sesión</button>
+  </div>
+  <div class="row">
+    <button id="btnStatus">Ver estado</button>
+    <button id="btnWipe">Borrar todo</button>
+  </div>
+  <pre id="out"></pre>
+
+  <script type="module">
+    import { FitDb } from './js/db.js';
+    import { runAll } from './tests/tests.js';
+
+    const $ = (id) => document.getElementById(id);
+    const out = $('out');
+    const log = (m) => { out.textContent += m + '\n'; out.scrollTop = out.scrollHeight; };
+    let db = new FitDb('fitcontrol');
+    window.fc = { get db() { return db; } };     // para la consola de escritorio
+
+    async function guard(fn) {
+      try { await fn(); } catch (e) { log('ERROR ' + e.name + ': ' + e.message); }
+    }
+    async function loadExercises() {
+      const data = await (await fetch('data/exercises.json')).json();
+      return data.exercises;
+    }
+
+    $('btnTests').onclick = () => guard(async () => { out.textContent = ''; log('Ejecutando pruebas (bases desechables)…'); await runAll(log); });
+    $('btnSeed').onclick = () => guard(async () => { log('ejercicios sembrados: ' + await db.seedExercises(await loadExercises())); });
+    $('btnRoutine').onclick = () => guard(async () => {
+      const ex = await db.listExercises();
+      if (!ex.length) { log('Primero siembra los ejercicios.'); return; }
+      const t = await db.createTemplate({
+        name: 'Cuerpo completo (ejemplo)', goal: 'Rutina de ejemplo para probar la app.',
+        items: [
+          { exerciseId: 'ex-sentadilla', sets: 3, reps: 8, restSec: 120, targetLoadKg: 60 },
+          { exerciseId: 'ex-press-banca', sets: 3, reps: 8, restSec: 90 },
+          { exerciseId: 'ex-remo-barra', sets: 3, reps: 8, restSec: 90 },
+          { exerciseId: 'ex-plancha', sets: 3, durationSec: 45, restSec: 60 },
+        ],
+      });
+      log('rutina creada: ' + t.name + ' (v' + t.version + ', id ' + t.id.slice(0, 8) + ')');
+    });
+    $('btnStart').onclick = () => guard(async () => {
+      const [t] = await db.listTemplates();
+      if (!t) { log('Primero crea una rutina.'); return; }
+      const s = await db.startSession(t.id);
+      log('sesión iniciada con snapshot de "' + s.templateSnapshot.name + '" v' + s.templateSnapshot.version + ' (id ' + s.id.slice(0, 8) + ')');
+    });
+    $('btnEntry').onclick = () => guard(async () => {
+      const s = await db.getActiveSession();
+      if (!s) { log('No hay sesión activa.'); return; }
+      const n = (await db.getSession(s.id)).entries.length;
+      const e = await db.addEntry(s.id, { exerciseId: 'ex-sentadilla', setNumber: n + 1, completed: true, actualReps: 8, actualLoadKg: 60 });
+      log('serie registrada: #' + e.sequence + ' ' + e.exerciseName + ' ' + e.actualReps + ' × ' + e.actualLoadKg + ' kg');
+    });
+    $('btnFinish').onclick = () => guard(async () => {
+      const s = await db.getActiveSession();
+      if (!s) { log('No hay sesión activa.'); return; }
+      const r = await db.setSessionState(s.id, 'completed');
+      log('sesión terminada: ' + r.status + ' a las ' + r.endedAt);
+    });
+    $('btnStatus').onclick = () => guard(async () => {
+      const c = await db.counts();
+      const act = await db.getActiveSession();
+      const last = await db.lastEntryForExercise('ex-sentadilla');
+      log('estado: ' + JSON.stringify(c));
+      log('rutinas: ' + (await db.listTemplates()).map((t) => t.name + ' v' + t.version).join(', ') || '(ninguna)');
+      log('sesión activa: ' + (act ? act.id.slice(0, 8) + ' ' + act.status : 'ninguna'));
+      log('último peso en sentadilla: ' + (last ? last.actualLoadKg + ' kg × ' + last.actualReps : '—'));
+    });
+    $('btnWipe').onclick = () => guard(async () => {
+      if (!confirm('¿Borrar TODOS los datos de FitControl en este dispositivo? No se puede deshacer.')) return;
+      db.close(); await FitDb.deleteDatabase('fitcontrol'); db = new FitDb('fitcontrol');
+      log('base de datos borrada.');
+    });
+    log('lista. Pulsa "Ejecutar pruebas" o prueba los botones en orden.');
+  </script>
+</body>
+</html>
