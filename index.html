@@ -19,7 +19,7 @@
   </style>
 </head>
 <body>
-  <h1>Spike temporizador · Día 5 · v2 (prueba larga)</h1>
+  <h1>Spike temporizador · Día 5 · v3 (descanso libre)</h1>
   <div id="recover" hidden style="border:2px solid #d9a400;padding:8px;margin:8px 0">
     <div id="recoverMsg"></div>
     <div class="row">
@@ -34,6 +34,18 @@
         <option value="3:30">3 × 30 s</option>
         <option value="3:10">3 × 10 s (rápido)</option>
         <option value="10:90">10 × 90 s (15 min, prueba larga)</option>
+        <option value="rest">Descanso libre (un solo descanso)</option>
+      </select>
+    </label>
+    <label>Descanso
+      <select id="restSec">
+        <option value="15">15 s</option>
+        <option value="45">45 s</option>
+        <option value="60" selected>60 s</option>
+        <option value="90">90 s</option>
+        <option value="120">120 s</option>
+        <option value="180">180 s</option>
+        <option value="240">240 s</option>
       </select>
     </label>
     <label>Aviso
@@ -153,7 +165,7 @@
 
     let runCfg = null;   // {cycles, sec, strategy}
     function snapshot() {
-      if (!engine || !runCfg) return;
+      if (!engine || !runCfg || runCfg.rest) return;   // el descanso libre no se persiste
       if (engine.state === 'done' || engine.state === 'idle') { clearRun(); return; }
       saveRun({ v: 1, cfg: runCfg, state: engine.state, index: engine.index,
         remainingMs: Math.round(engine.remainingMs()), savedAtWall: Date.now() });
@@ -179,17 +191,27 @@
     }
     function logSyncB(label) {
       if (!trackActive) return;
-      const d = track.currentTime - engineElapsedSec();
-      log('B ' + label + ': audio=' + track.currentTime.toFixed(2) + 's motor=' + engineElapsedSec().toFixed(2) +
+      const a = track.currentTime - trackOffset;
+      const d = a - engineElapsedSec();
+      log('B ' + label + ': audio=' + a.toFixed(2) + 's motor=' + engineElapsedSec().toFixed(2) +
         's diferencia=' + d.toFixed(2) + 's paused=' + track.paused);
     }
     const CUES = { '3:10': 'cue-10.wav', '3:30': 'cue-30.wav', '10:90': 'cue-10x90.wav' };
-    function startTrack(cycles, sec) {
+    const REST_LEN = 300;      // segundo de cue-rest.wav donde suena el beep
+    let trackOffset = 0;       // desde dónde se empezó a reproducir (0 salvo en descanso libre)
+    function startTrack(cycles, sec, isRest) {
       trackActive = $('strategy').value === 'B';
       if (!trackActive) return;
-      track.src = CUES[cycles + ':' + sec];
-      track.currentTime = 0;
-      track.play().then(() => log('B: reproduciendo pista ' + CUES[cycles + ':' + sec]))
+      trackOffset = isRest ? REST_LEN - sec : 0;
+      track.src = isRest ? 'cue-rest.wav' : CUES[cycles + ':' + sec];
+      if (trackOffset) {
+        // El salto solo es posible cuando ya hay metadatos; mientras tanto suena silencio.
+        track.addEventListener('loadedmetadata', () => {
+          track.currentTime = trackOffset;
+          log('B: salto a ' + trackOffset + ' s (descanso de ' + sec + ' s)');
+        }, { once: true });
+      } else track.currentTime = 0;
+      track.play().then(() => log('B: reproduciendo pista ' + (isRest ? 'cue-rest.wav' : CUES[cycles + ':' + sec])))
         .catch((err) => log('B: no pudo reproducir: ' + err.name));
       if ('mediaSession' in navigator) {
         navigator.mediaSession.metadata = new MediaMetadata({ title: 'Descanso', artist: 'FitControl spike' });
@@ -254,13 +276,15 @@
     setInterval(() => { if (engine) { engine.tick(); render(); } }, 100);
 
     $('start').onclick = () => {
-      const [cycles, sec] = $('mode').value.split(':').map(Number);
-      runCfg = { cycles, sec, strategy: $('strategy').value };
+      const isRest = $('mode').value === 'rest';
+      const [cycles, sec] = isRest ? [1, Number($('restSec').value)] : $('mode').value.split(':').map(Number);
+      runCfg = { cycles, sec, strategy: $('strategy').value, rest: isRest };
       resetStats();
-      engine = new SpikeEngine.Engine(SpikeEngine.buildPhases(cycles, sec), () => performance.now(), onEvent);
+      const phases = isRest ? [{ name: 'Descanso libre', ms: sec * 1000 }] : SpikeEngine.buildPhases(cycles, sec);
+      engine = new SpikeEngine.Engine(phases, () => performance.now(), onEvent);
       unlockAudio();            // el gesto del usuario habilita el audio
       requestWakeLock();
-      startTrack(cycles, sec);  // dentro del gesto, requisito para reproducir
+      startTrack(cycles, sec, isRest);  // dentro del gesto, requisito para reproducir
       engine.start(); render();
     };
     function togglePause() {
