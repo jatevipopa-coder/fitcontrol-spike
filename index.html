@@ -19,7 +19,7 @@
   </style>
 </head>
 <body>
-  <h1>Spike temporizador · Día 5 · v5 (audio y Spotify)</h1>
+  <h1>Spike temporizador · Día 5 · v6 (beep programado)</h1>
   <div id="recover" hidden style="border:2px solid #d9a400;padding:8px;margin:8px 0">
     <div id="recoverMsg"></div>
     <div class="row">
@@ -64,6 +64,7 @@
         <option value="transient-solo">transient-solo</option>
       </select>
     </label>
+    <label><input type="checkbox" id="schedBeep"> Beep programado en el reloj de audio (solo aviso A + Descanso libre)</label>
     <label><input type="checkbox" id="useMS" checked> Usar Media Session</label>
     <label><input type="checkbox" id="releaseAudio"> Liberar audio al terminar</label>
     <button id="testSound" type="button">Probar sonido</button>
@@ -102,7 +103,10 @@
     let audioCtx = null;
     function unlockAudio() {
       try {
-        if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        if (!audioCtx) {
+          audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          audioCtx.onstatechange = () => log('AudioContext → ' + audioCtx.state + ' (t=' + audioCtx.currentTime.toFixed(2) + ')');
+        }
         if (audioCtx.state !== 'running') audioCtx.resume().then(() => log('AudioContext: ' + audioCtx.state));
         else log('AudioContext: running');
       } catch (err) { log('AudioContext no disponible: ' + err.message); }
@@ -118,6 +122,7 @@
       gain.gain.exponentialRampToValueAtTime(0.0001, t + durMs / 1000);
       osc.connect(gain).connect(audioCtx.destination);
       osc.start(t); osc.stop(t + durMs / 1000 + 0.02);
+      scheduled.push(osc);
       return true;
     }
     function flash() {
@@ -125,9 +130,22 @@
       document.body.style.background = '#ffd400';
       setTimeout(() => { document.body.style.background = prev; }, 250);
     }
+    // Beep programado: se encola en el reloj de audio al empezar, así no depende de que el JS despierte a tiempo.
+    let scheduled = []; let scheduledActive = false;
+    function cancelScheduled() { scheduled.forEach((o) => { try { o.stop(); } catch { /* ya terminó */ } }); scheduled = []; scheduledActive = false; }
+    function scheduleEnd(sec) {
+      if (!audioCtx) return;
+      cancelScheduled();
+      beep(660, 700, sec);                                   // mismo beep largo del fin del descanso
+      scheduledActive = true;
+      log('beep programado a +' + sec.toFixed(1) + ' s · ctx=' + audioCtx.state + ' t=' + audioCtx.currentTime.toFixed(2));
+    }
+
     function alertUser(kind) { // kind: 'phase' | 'done' | 'test'
       const strategy = $('strategy').value;
+      if (audioCtx) log('ctx al avisar: ' + audioCtx.state + ' t=' + audioCtx.currentTime.toFixed(2));
       flash();
+      if (strategy === 'A' && kind === 'done' && scheduledActive) { scheduledActive = false; log('beep ya programado: solo flash'); return; }
       if (strategy === 'B') {
         if (kind === 'test') log('B: el sonido solo sale de la pista; inicia una sesión para oírlo');
         else logSyncB('aviso');
@@ -311,15 +329,22 @@
       unlockAudio();            // el gesto del usuario habilita el audio
       requestWakeLock();
       startTrack(cycles, sec, isRest);  // dentro del gesto, requisito para reproducir
+      cancelScheduled();
+      if (isRest && $('strategy').value === 'A' && $('schedBeep').checked) scheduleEnd(sec);
       engine.start(); render();
     };
     function togglePause() {
-      if (engine.state === 'paused') { unlockAudio(); engine.resume(); if (trackActive) track.play(); }
-      else { engine.pause(); if (trackActive) track.pause(); }
+      if (engine.state === 'paused') {
+        unlockAudio(); engine.resume(); if (trackActive) track.play();
+        if (runCfg?.rest && $('strategy').value === 'A' && $('schedBeep').checked) scheduleEnd(engine.remainingMs() / 1000);
+      } else {
+        engine.pause(); if (trackActive) track.pause();
+        if (scheduledActive) { cancelScheduled(); log('beep programado cancelado por la pausa'); }
+      }
       render();
     }
     $('pause').onclick = togglePause;
-    $('reset').onclick = () => { engine.reset(); stopTrack(); releaseWakeLock(); render(); };
+    $('reset').onclick = () => { engine.reset(); cancelScheduled(); stopTrack(); releaseWakeLock(); render(); };
     $('testSound').onclick = () => { applyAudioType(); unlockAudio(); alertUser('test'); };
     $('summary').onclick = printSummary;
 

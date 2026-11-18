@@ -1,7 +1,7 @@
 // Service worker del spike. Cache-first versionado.
 // Decisión consciente: NO se llama a skipWaiting() ni clients.claim(), para que una versión nueva
 // no tome el control en mitad de un entrenamiento; se activa al cerrar todas las pestañas.
-const VERSION = 'spike-v6';
+const VERSION = 'spike-v7';
 const ASSETS = [
   './', './index.html', './engine.js', './manifest.webmanifest',
   './icon-192.png', './icon-512.png', './cue-10.wav', './cue-30.wav', './cue-10x90.wav', './cue-rest.wav',
