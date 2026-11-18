@@ -27,7 +27,8 @@ function go(hash) {
 
 // ---------------------------------------------------------------- lista
 function installBanner() {
-  if (isStandalone()) return null;
+  // OJO: Node.append(null) escribe el texto "null". Un fragmento vacío no añade nada.
+  if (isStandalone()) return document.createDocumentFragment();
   return h('div', { class: 'warn', role: 'note', 'data-test': 'install-banner' },
     h('strong', {}, 'Instala la app para no perder tus datos. '),
     'Tus datos se guardan solo en este dispositivo y el navegador puede borrarlos si la usas en una pestaña. ' +
